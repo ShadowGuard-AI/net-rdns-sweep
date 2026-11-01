@@ -72,21 +72,35 @@ def sweep_ip_range(ip_range, threads=10):
 
     try:
         network = ipaddress.ip_network(ip_range)
-        ip_addresses = [str(ip) for ip in network]
 
+        # Feed the network iterator straight into the lookup loop, with
+        # only a small window of lookups in flight at a time. The whole
+        # network is never built as a list, so lookups start at once and
+        # memory stays flat even for a very large range.
         with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-            future_to_ip = {executor.submit(reverse_dns_lookup, ip): ip for ip in ip_addresses}
-            for future in concurrent.futures.as_completed(future_to_ip):
-                ip = future_to_ip[future]
-                try:
+            pending = {}
+            addresses = iter(network)
+            exhausted = False
+            while True:
+                while not exhausted and len(pending) < threads:
+                    try:
+                        ip = str(next(addresses))
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    pending[executor.submit(reverse_dns_lookup, ip)] = ip
+                if not pending:
+                    break
+                done, _not_done = concurrent.futures.wait(
+                    pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    ip = pending.pop(future)
                     hostname = future.result()
                     if hostname:
                         results[ip] = hostname
                         logging.info(f"Found hostname {hostname} for {ip}")
                     else:
                         logging.debug(f"No hostname found for {ip}")
-                except Exception as e:
-                    logging.error(f"Error processing {ip}: {e}")
 
     except Exception as e:
         logging.error(f"Error sweeping IP range: {e}")
