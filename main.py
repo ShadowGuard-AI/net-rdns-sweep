@@ -23,7 +23,9 @@ def reverse_dns_lookup(ip_address):
         addr = dns.reversename.from_address(ip_address)
         resolver = dns.resolver.Resolver()
         result = resolver.resolve(addr, "PTR")
+        # I take only the first PTR record. An address can publish several, and this tool reports one name per address, so the rest are dropped without any note in the output.
         return str(result[0])
+    # NXDOMAIN and a timeout both come back as None, but I keep them apart in the logs. One means the name does not exist and will not appear later, the other means I learned nothing and a rerun might find it.
     except dns.resolver.NXDOMAIN:
         return None
     except dns.resolver.Timeout:
@@ -48,6 +50,7 @@ def is_valid_ip_range(ip_range):
         bool: True if the IP range is valid, False otherwise.
     """
     try:
+        # ip_network is strict by default, so a range written with host bits set, like 192.168.1.5/24, is rejected as invalid instead of being quietly rounded down to the network. Main does not explain that, it just gets an empty result.
         ipaddress.ip_network(ip_range)
         return True
     except ValueError:
@@ -82,6 +85,7 @@ def sweep_ip_range(ip_range, threads=10):
             addresses = iter(network)
             exhausted = False
             while True:
+                # I cap the window at the thread count itself, not some larger queue. That keeps the number of sockets and resolver objects in play close to the workers that will actually run them, at the cost of refilling more often.
                 while not exhausted and len(pending) < threads:
                     try:
                         ip = str(next(addresses))
@@ -95,6 +99,7 @@ def sweep_ip_range(ip_range, threads=10):
                     pending, return_when=concurrent.futures.FIRST_COMPLETED)
                 for future in done:
                     ip = pending.pop(future)
+                    # reverse_dns_lookup swallows its own errors and returns None, so result() here should not raise. If it ever does, the outer handler ends the whole sweep and throws away the names already collected, which is a sharp edge in this design.
                     hostname = future.result()
                     if hostname:
                         results[ip] = hostname
@@ -137,6 +142,7 @@ def main():
     threads = args.threads
     output_file = args.output
 
+    # Main returns with no error code on this path because main has no return value and the script just ends. A calling script sees exit 0 for a refused run, so the log line is the only signal.
     if threads <= 0:
         logging.error("Number of threads must be greater than 0.")
         return
@@ -147,6 +153,7 @@ def main():
         if output_file:
             try:
                 with open(output_file, "w") as f:
+                    # The order in the file is completion order, not address order, because results were filled as futures finished. Anyone diffing two runs of the same range will see lines move around even when nothing changed.
                     for ip, hostname in results.items():
                         f.write(f"{ip}: {hostname}\n")
                 logging.info(f"Results saved to {output_file}")
